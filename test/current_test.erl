@@ -10,7 +10,7 @@
 -define(TABLE_OTHER, <<"current_test_other">>).
 -define(i2b(I), list_to_binary(integer_to_list(I))).
 
--define(NUMBER(I), {[{<<"N">>, ?i2b(I)}]}).
+-define(NUMBER(I), #{<<"N">> => ?i2b(I)}).
 
 current_test_() ->
     {setup, fun setup/0, fun teardown/1,
@@ -54,8 +54,8 @@ batch_get_write_item() ->
     ok = create_table(?TABLE_OTHER),
     ok = clear_table(?TABLE_OTHER),
 
-    Keys = [{[{<<"range_key">>, ?NUMBER(random:uniform(1000))},
-              {<<"hash_key">>, ?NUMBER(random:uniform(100000))}]}
+    Keys = [#{<<"range_key">> => ?NUMBER(random:uniform(1000)),
+              <<"hash_key">> => ?NUMBER(random:uniform(100000))}
             || _ <- lists:seq(1, 50)],
 
     WriteRequestItems = [{[{<<"PutRequest">>, {[{<<"Item">>, Key}]}}]}
@@ -84,8 +84,8 @@ batch_get_unprocessed_items() ->
     ok = create_table(?TABLE),
     ok = create_table(?TABLE_OTHER),
 
-    Keys = [{[{<<"range_key">>, ?NUMBER(random:uniform(1000))},
-              {<<"hash_key">>, ?NUMBER(random:uniform(100000))}]}
+    Keys = [#{<<"range_key">> => ?NUMBER(random:uniform(1000)),
+              <<"hash_key">>  => ?NUMBER(random:uniform(100000))}
             || _ <- lists:seq(1, 150)],
 
     WriteRequestItems = [{[{<<"PutRequest">>, {[{<<"Item">>, Key}]}}]}
@@ -219,8 +219,8 @@ q() ->
     ok = create_table(?TABLE),
     ok = clear_table(?TABLE),
 
-    Items = [{[{<<"range_key">>, {[{<<"N">>, ?i2b(I)}]}},
-               {<<"hash_key">>, {[{<<"N">>, <<"1">>}]}}]}
+    Items = [#{<<"range_key">> => ?NUMBER(I),
+               <<"hash_key">>  => ?NUMBER(1)}
              || I <- lists:seq(1, 100)],
 
     RequestItems = [begin
@@ -274,22 +274,22 @@ get_put_update_delete() ->
     Key = {[{<<"hash_key">>, {[{<<"N">>, <<"1">>}]}},
             {<<"range_key">>, {[{<<"N">>, <<"1">>}]}}]},
 
-    Item = {[{<<"attribute">>, {[{<<"SS">>, [<<"foo">>]}]}},
-             {<<"range_key">>, {[{<<"N">>, <<"1">>}]}},
-             {<<"hash_key">>, {[{<<"N">>, <<"1">>}]}}]},
+    Item = {[{<<"attribute">>, #{<<"SS">> => [<<"foo">>]}},
+             {<<"range_key">>, #{<<"N">>  => <<"1">>}},
+             {<<"hash_key">>,  #{<<"N">>  => <<"1">>}}]},
 
-    {ok, {NoItem}} = current:get_item({[{<<"TableName">>, ?TABLE},
+    {ok, NoItem} = current:get_item({[{<<"TableName">>, ?TABLE},
                                         {<<"Key">>, Key}]}),
-    ?assertNot(proplists:is_defined(<<"Item">>, NoItem)),
+    ?assertNot(maps:is_key(<<"Item">>, NoItem)),
 
 
     ?assertMatch({ok, _}, current:put_item({[{<<"TableName">>, ?TABLE},
                                              {<<"Item">>, Item}]})),
 
-    {ok, {WithItem}} = current:get_item({[{<<"TableName">>, ?TABLE},
+    {ok, WithItem} = current:get_item({[{<<"TableName">>, ?TABLE},
                                         {<<"Key">>, Key}]}),
-    {ActualItem} = proplists:get_value(<<"Item">>, WithItem),
-    ?assertEqual(lists:sort(element(1, Item)), lists:sort(ActualItem)),
+    ActualItem = maps:get(<<"Item">>, WithItem),
+    ?assertEqual(lists:sort(element(1, Item)), lists:sort(maps:to_list(ActualItem))),
 
     {ok, _} = current:update_item(
                 {[{<<"TableName">>, ?TABLE},
@@ -299,21 +299,21 @@ get_put_update_delete() ->
                                         ]}}]}},
                   {<<"Key">>, Key}]}),
 
-    {ok, {WithUpdate}} = current:get_item({[{<<"TableName">>, ?TABLE},
-                                             {<<"Key">>, Key}]}),
-    {UpdatedItem} = proplists:get_value(<<"Item">>, WithUpdate),
-    Attribute = proplists:get_value(<<"attribute">>, UpdatedItem),
-    ?assertMatch({[{<<"SS">>, _Values}]}, Attribute),
-    {[{<<"SS">>, Values}]} = Attribute,
+    {ok, WithUpdate} = current:get_item({[{<<"TableName">>, ?TABLE},
+                                          {<<"Key">>, Key}]}),
+    UpdatedItem = maps:get(<<"Item">>, WithUpdate),
+    Attribute = maps:get(<<"attribute">>, UpdatedItem),
+    ?assertMatch(#{<<"SS">> := _Values}, Attribute),
+    #{<<"SS">> := Values} = Attribute,
     ?assertEqual([<<"bar">>, <<"foo">>], lists:sort(Values)),
 
 
     ?assertMatch({ok, _}, current:delete_item({[{<<"TableName">>, ?TABLE},
                                                 {<<"Key">>, Key}]})),
 
-    {ok, {NoItemAgain}} = current:get_item({[{<<"TableName">>, ?TABLE},
-                                             {<<"Key">>, Key}]}),
-    ?assertNot(proplists:is_defined(<<"Item">>, NoItemAgain)).
+    {ok, NoItemAgain} = current:get_item({[{<<"TableName">>, ?TABLE},
+                                           {<<"Key">>, Key}]}),
+    ?assertNot(maps:is_key(<<"Item">>, NoItemAgain)).
 
 
 retry_with_timeout() ->

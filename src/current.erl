@@ -102,14 +102,11 @@ update_table(Request, Opts)     -> retry(update_table, Request, Opts).
 
 wait_for_active(Table, Timeout) ->
     case describe_table({[{<<"TableName">>, Table}]}, [{timeout, Timeout}]) of
-        {ok, {[{<<"Table">>, {Description}}]}} ->
-            case proplists:get_value(<<"TableStatus">>, Description) of
-                <<"ACTIVE">> ->
-                    ok;
-                <<"DELETING">> ->
-                    {error, deleting};
-                _Other ->
-                    wait_for_active(Table, Timeout)
+        {ok, #{<<"Table">> := Description}} ->
+            case maps:get(<<"TableStatus">>, Description) of
+                <<"ACTIVE">>   -> ok;
+                <<"DELETING">> -> {error, deleting};
+                _Other         -> wait_for_active(Table, Timeout)
             end;
         {error, {<<"ResourceNotFoundException">>, _}} ->
             {error, not_found}
@@ -118,12 +115,10 @@ wait_for_active(Table, Timeout) ->
 
 wait_for_delete(Table, Timeout) ->
     case describe_table({[{<<"TableName">>, Table}]}, [{timeout, Timeout}]) of
-        {ok, {[{<<"Table">>, {Description}}]}} ->
-            case proplists:get_value(<<"TableStatus">>, Description) of
-                <<"DELETING">> ->
-                    wait_for_delete(Table, Timeout);
-                Other ->
-                    {error, {unexpected_state, Other}}
+        {ok, #{<<"Table">> := Description}} ->
+            case maps:get(<<"TableStatus">>, Description) of
+                <<"DELETING">> -> wait_for_delete(Table, Timeout);
+                Other          -> {error, {unexpected_state, Other}}
             end;
         {error, {<<"ResourceNotFoundException">>, _}} ->
             ok
@@ -162,24 +157,23 @@ do_batch_get_item({Request}, Acc, Opts) ->
             BatchRequest = {[{<<"RequestItems">>, {Batch}} | CleanRequest]},
 
             case retry(batch_get_item, BatchRequest, Opts) of
-                {ok, {Result}} ->
-                    {Responses} = proplists:get_value(<<"Responses">>, Result),
+                {ok, Result} ->
+                    Responses = maps:get(<<"Responses">>, Result),
                     NewAcc = orddict:merge(fun (_, Left, Right) -> Left ++ Right end,
-                                           orddict:from_list(Responses),
+                                           orddict:from_list(maps:to_list(Responses)),
                                            orddict:from_list(Acc)),
 
-                    {Unprocessed} = proplists:get_value(<<"UnprocessedKeys">>, Result),
+                    Unprocessed = maps:get(<<"UnprocessedKeys">>, Result),
                     Remaining = orddict:merge(
-                                  fun (_, {Left}, {Right}) ->
-                                          LeftKeys = proplists:get_value(
-                                                       <<"Keys">>, Left),
+                                  fun (_, Left, {Right}) ->
+                                          LeftKeys = maps:get(<<"Keys">>, Left),
                                           RightKeys = proplists:get_value(
                                                         <<"Keys">>, Right),
                                           {lists:keystore(
                                              <<"Keys">>, 1, Right,
                                              {<<"Keys">>, LeftKeys ++ RightKeys})}
                                   end,
-                                  orddict:from_list(Unprocessed),
+                                  orddict:from_list(maps:to_list(Unprocessed)),
                                   orddict:from_list(Rest)),
                     do_batch_get_item({[{<<"RequestItems">>, {Remaining}}]},
                                       NewAcc, Opts);
@@ -200,16 +194,16 @@ do_batch_write_item({Request}, Opts) ->
             BatchRequest = {[{<<"RequestItems">>, {Batch}} | CleanRequest]},
 
             case retry(batch_write_item, BatchRequest, Opts) of
-                {ok, {Result}} ->
-                    {Unprocessed} = proplists:get_value(<<"UnprocessedItems">>, Result),
-                    case Unprocessed =:= [] andalso Rest =:= [] of
+                {ok, Result} ->
+                    Unprocessed = maps:get(<<"UnprocessedItems">>, Result),
+                    case maps:size(Unprocessed) == 0 andalso Rest =:= [] of
                         true ->
                             ok;
                         false ->
                             Remaining = orddict:merge(fun (_, Left, Right) ->
                                                               Left ++ Right
                                                       end,
-                                                      orddict:from_list(Unprocessed),
+                                                      orddict:from_list(maps:to_list(Unprocessed)),
                                                       orddict:from_list(Rest)),
 
                             do_batch_write_item({[{<<"RequestItems">>, {Remaining}}]}, Opts)
@@ -307,16 +301,16 @@ do_query({UserRequest}, {Acc, AccLen}, Opts) ->
                  end,
 
     case retry('query', Request, Opts) of
-        {ok, {Response}} ->
+        {ok, Response} ->
             Result = case IsCount of
-                         true -> proplists:get_value(<<"Count">>, Response);
-                         false -> proplists:get_value(<<"Items">>, Response)
+                         true  -> maps:get(<<"Count">>, Response);
+                         false -> maps:get(<<"Items">>, Response)
                      end,
-            case proplists:get_value(<<"LastEvaluatedKey">>, Response) of
-                undefined ->
+            case maps:find(<<"LastEvaluatedKey">>, Response) of
+                error ->
                     {ResultAcc, _} = Accumulate(Result, {Acc, AccLen}),
                     {ok, ResultAcc};
-                LastEvaluatedKey ->
+                {ok, LastEvaluatedKey} ->
                     {NewAcc, NewLen} = Accumulate(Result, {Acc, AccLen}),
                     case proplists:get_value(max_items, Opts, infinity) > NewLen of
                         true ->
@@ -359,17 +353,17 @@ do_scan({UserRequest}, Acc, Opts) ->
     Request = {ExclusiveStartKey ++ UserRequest},
 
     case retry(scan, Request, Opts) of
-        {ok, {Response}} ->
-            Items = proplists:get_value(<<"Items">>, Response, []),
-            case proplists:get_value(<<"LastEvaluatedKey">>, Response) of
-                undefined ->
-                    {ok, Items ++ Acc};
-                LastEvaluatedKey ->
+        {ok, Response} ->
+            Items = maps:get(<<"Items">>, Response, []),
+            case maps:find(<<"LastEvaluatedKey">>, Response) of
+                {ok, LastEvaluatedKey} ->
                     NextRequest = {lists:keystore(
                                      <<"ExclusiveStartKey">>, 1,
                                      UserRequest,
                                      {<<"ExclusiveStartKey">>, LastEvaluatedKey})},
-                    do_scan(NextRequest, Items ++ Acc, Opts)
+                    do_scan(NextRequest, Items ++ Acc, Opts);
+                error ->
+                    {ok, Items ++ Acc}
             end;
 
         {error, Reason} ->
@@ -400,11 +394,12 @@ retry(Op, Request, Retries, Start, Opts) ->
     case do(Op, Request, Opts) of
         {ok, Response} ->
 
-            case proplists:get_value(<<"ConsumedCapacity">>,
-                                     element(1, Response)) of
-                undefined -> ok;
-                Capacity  -> catch (callback_mod()):request_complete(
-                                     Op, RequestStart, Capacity)
+            case maps:find(<<"ConsumedCapacity">>, Response) of
+                {ok, Capacity}  ->
+                    Mod = callback_mod(),
+                    catch Mod:request_complete(Op, RequestStart, Capacity);
+                error ->
+                    ok
             end,
 
             {ok, Response};
@@ -460,13 +455,13 @@ do(Operation, {UserRequest}, Opts) ->
                                         {call_timeout, CallTimeout},
                                         {claim_timeout, ClaimTimeout}]) of
         {ok, {{200, _}, _, ResponseBody}} ->
-            {ok, jiffy:decode(ResponseBody)};
+            {ok, jiffy:decode(ResponseBody, [return_maps])};
 
         {ok, {{Code, _}, _, ResponseBody}}
           when 400 =< Code andalso Code =< 599 ->
             try
-                {Response} = jiffy:decode(ResponseBody),
-                Type = case proplists:get_value(<<"__type">>, Response) of
+                Response = jiffy:decode(ResponseBody, [return_maps]),
+                Type = case maps:get(<<"__type">>, Response) of
                            <<"com.amazonaws.dynamodb.v20120810#", T/binary>> ->
                                T;
                            <<"com.amazon.coral.validate#", T/binary>> ->
@@ -474,12 +469,12 @@ do(Operation, {UserRequest}, Opts) ->
                            <<"com.amazon.coral.service#", T/binary>> ->
                                T
                        end,
-                Message = case proplists:get_value(<<"message">>, Response) of
-                              undefined ->
+                Message = case maps:find(<<"message">>, Response) of
+                              {ok, M} ->
+                                  M;
+                              error ->
                                   %% com.amazon.coral.service#SerializationException
-                                  proplists:get_value(<<"Message">>, Response);
-                              M ->
-                                  M
+                                  maps:get(<<"Message">>, Response)
                           end,
                 {error, {Type, Message}}
             catch
