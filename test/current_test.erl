@@ -34,98 +34,101 @@ current_test_() ->
 
 
 table_manipulation() ->
-    current:delete_table({[{<<"TableName">>, ?TABLE}]}),
-    ?assertEqual(ok, current:wait_for_delete(?TABLE, 5000)),
+    Table = ?TABLE,
+    current:delete_table(#{<<"TableName">> => Table}),
+    ?assertEqual(ok, current:wait_for_delete(Table, 5000)),
 
     ?assertMatch({error, {<<"ResourceNotFoundException">>, _}},
-                 current:describe_table({[{<<"TableName">>, ?TABLE}]})),
+                 current:describe_table({[{<<"TableName">>, Table}]})),
 
-    ok = create_table(?TABLE),
+    {ok, _} = create_table(Table),
 
-    ?assertEqual(ok, current:wait_for_active(?TABLE, 5000)),
-    ?assertMatch({ok, _}, current:describe_table({[{<<"TableName">>, ?TABLE}]})),
+    ?assertEqual(ok, current:wait_for_active(Table, 5000)),
+    ?assertMatch({ok, _}, current:describe_table({[{<<"TableName">>, Table}]})),
     %% TODO: list tables and check membership
     ok.
 
 
 batch_get_write_item() ->
-    ok = create_table(?TABLE),
-    ok = clear_table(?TABLE),
-    ok = create_table(?TABLE_OTHER),
-    ok = clear_table(?TABLE_OTHER),
+    Table = <<"batch_get_write_item_table">>,
+    TableOther = <<"batch_get_write_item_table_other">>,
+    {ok, _} = create_table(Table),
+    {ok, _} = create_table(TableOther),
 
     Keys = [#{<<"range_key">> => ?NUMBER(random:uniform(1000)),
               <<"hash_key">> => ?NUMBER(random:uniform(100000))}
             || _ <- lists:seq(1, 50)],
 
-    WriteRequestItems = [{[{<<"PutRequest">>, {[{<<"Item">>, Key}]}}]}
-                         || Key <- Keys],
-    WriteRequest = {[{<<"RequestItems">>,
-                      {[{?TABLE, WriteRequestItems},
-                        {?TABLE_OTHER, WriteRequestItems}]}
-                     }]},
+    WriteRequestItems = [#{<<"PutRequest">> => #{<<"Item">> => Key}} || Key <- Keys],
+    WriteRequest = #{<<"RequestItems">> => maps:from_list([
+            {Table, WriteRequestItems},
+            {TableOther, WriteRequestItems}
+    ])},
 
     ?assertEqual(ok, current:batch_write_item(WriteRequest, [])),
 
-    GetRequest = {[{<<"RequestItems">>,
-                    {[{?TABLE, {[{<<"Keys">>, Keys}]}},
-                      {?TABLE_OTHER, {[{<<"Keys">>, Keys}]}}
-                     ]}
-                   }]},
+    GetRequest = #{<<"RequestItems">> => maps:from_list([
+        {Table, #{<<"Keys">> => Keys}},
+        {TableOther, #{<<"Keys">> => Keys}}
+    ])},
 
-    {ok, [{?TABLE_OTHER, Table1}, {?TABLE, Table2}]} =
-        current:batch_get_item(GetRequest),
-
-    ?assertEqual(lists:sort(Keys), lists:sort(Table1)),
-    ?assertEqual(lists:sort(Keys), lists:sort(Table2)).
+    {ok, Result} = current:batch_get_item(GetRequest),
+    ?assertEqual(lists:sort(Keys), lists:sort(maps:get(Table, Result))),
+    ?assertEqual(lists:sort(Keys), lists:sort(maps:get(TableOther, Result))).
 
 
 batch_get_unprocessed_items() ->
-    ok = create_table(?TABLE),
-    ok = create_table(?TABLE_OTHER),
+    Table = <<"batch_get_unprocessed_items_table">>,
+    TableOther = <<"batch_get_unprocessed_items_table_other">>,
+    create_table(Table),
+    create_table(TableOther),
 
-    Keys = [#{<<"range_key">> => ?NUMBER(random:uniform(1000)),
-              <<"hash_key">>  => ?NUMBER(random:uniform(100000))}
-            || _ <- lists:seq(1, 150)],
+    Keys = [
+        #{
+            <<"range_key">> => ?NUMBER(random:uniform(1000)),
+            <<"hash_key">>  => ?NUMBER(random:uniform(100000))
+        }
+        || _ <- lists:seq(1, 150)
+    ],
 
-    WriteRequestItems = [{[{<<"PutRequest">>, {[{<<"Item">>, Key}]}}]}
-                         || Key <- Keys],
-    WriteRequest = {[{<<"RequestItems">>,
-                      {[{?TABLE, WriteRequestItems},
-                        {?TABLE_OTHER, WriteRequestItems}]}
-                     }]},
+    WriteRequestItems = [
+        #{<<"PutRequest">> => #{<<"Item">> => Key}} || Key <- Keys
+    ],
+    WriteRequest = #{
+        <<"RequestItems">> => maps:from_list([
+            {Table, WriteRequestItems},
+            {TableOther, WriteRequestItems}
+        ])
+    },
 
     ?assertEqual(ok, current:batch_write_item(WriteRequest, [])),
 
 
     {Keys1, Keys2} = lists:split(110, Keys),
-    UnprocessedKeys = {[{?TABLE, {[{<<"Keys">>, Keys2}]}},
-                        {?TABLE_OTHER, {[{<<"Keys">>, Keys2}]}}
+    UnprocessedKeys = {[{Table, {[{<<"Keys">>, Keys2}]}},
+                        {TableOther, {[{<<"Keys">>, Keys2}]}}
                        ]},
     meck:new(party, [passthrough]),
-    meck:expect(party, post, 4,
-                meck:seq([fun (URL, Headers, Body, Opts) ->
-                                  {ok, {{200, <<"OK">>}, ResponseHeaders, ResponseBody}} =
-                                       meck:passthrough([URL, Headers, Body, Opts]),
-                                  {Result} = jiffy:decode(ResponseBody),
-                                  ?assertEqual(
-                                     {[]}, proplists:get_value(<<"UnprocessedKeys">>, Result)),
-                                  MockResult = lists:keystore(
-                                                 <<"UnprocessedKeys">>, 1,
-                                                 Result, {<<"UnprocessedKeys">>,
-                                                          UnprocessedKeys}),
-                                  {ok, {{200, <<"OK">>}, ResponseHeaders,
-                                        jiffy:encode({MockResult})}}
-                          end,
-                          meck:passthrough()])),
+    meck:expect(party, post, 4, meck:seq([
+        fun (URL, Headers, Body, Opts) ->
+            {ok, {{200, <<"OK">>}, ResponseHeaders, ResponseBody}} =
+                meck:passthrough([URL, Headers, Body, Opts]),
+            Result = jiffy:decode(ResponseBody, [return_maps]),
+            % ?assertNot(maps:is_key(<<"UnprocessedKeys">>, Result)),
+            MockResult = maps:put(<<"UnprocessedKeys">>, UnprocessedKeys, Result),
+            {ok, {{200, <<"OK">>}, ResponseHeaders, jiffy:encode(MockResult)}}
+        end,
+        meck:passthrough()
+    ])),
 
-    GetRequest = {[{<<"RequestItems">>,
-                    {[{?TABLE, {[{<<"Keys">>, Keys1}]}},
-                      {?TABLE_OTHER, {[{<<"Keys">>, Keys1}]}}
-                     ]}
-                   }]},
+    GetRequest = #{
+        <<"RequestItems">> => maps:from_list([
+            {Table, #{<<"Keys">> => Keys1}},
+            {TableOther, #{<<"Keys">> => Keys1}}
+        ])
+    },
 
-    {ok, [{?TABLE_OTHER, Table1}, {?TABLE, Table2}]} =
+    {ok, [{TableOther, Table1}, {Table, Table2}]} =
         current:batch_get_item(GetRequest, []),
 
     ?assertEqual(lists:sort(Keys), lists:sort(Table1)),
@@ -136,128 +139,162 @@ batch_get_unprocessed_items() ->
 
 
 scan() ->
-    ok = create_table(?TABLE),
-    RequestItems = [begin
-                        {[{<<"PutRequest">>,
-                           {[{<<"Item">>,
-                              {[{<<"hash_key">>, {[{<<"N">>, <<"1">>}]}},
-                                {<<"range_key">>, {[{<<"N">>, ?i2b(I)}]}},
-                                {<<"attribute">>, {[{<<"S">>, <<"foo">>}]}}
-                               ]}}]}
-                          }]}
-                    end || I <- lists:seq(1, 100)],
-    Request = {[{<<"RequestItems">>,
-                 {[{?TABLE, RequestItems}]}
-                }]},
+    Table = <<"scan_table">>,
+    create_table(Table),
+    RequestItems = [
+        #{
+            <<"PutRequest">> => #{
+                <<"Item">> => #{
+                    <<"hash_key">> => ?NUMBER(1),
+                    <<"range_key">> => ?NUMBER(I),
+                    <<"attribute">> => #{<<"S">> => <<"foo">>}
+                }
+            }
+        }
+        || I <- lists:seq(1, 100)
+    ],
+    Request = #{<<"RequestItems">> => maps:from_list([{Table, RequestItems}])},
 
     ok = current:batch_write_item(Request, []),
 
-    Q = {[{<<"TableName">>, ?TABLE}]},
+    Q = #{<<"TableName">> => Table},
 
     ?assertMatch({ok, L} when is_list(L), current:scan(Q, [])),
 
     %% Errors
-    ErrorQ = {[{<<"TableName">>, <<"non-existing-table">>}]},
+    ErrorQ = #{<<"TableName">> => <<"non-existing-table">>},
     ?assertMatch({error, {<<"ResourceNotFoundException">>, _}},
                  current:scan(ErrorQ, [])).
 
 
 
 take_write_batch_test() ->
-    ?assertEqual({[{<<"table1">>, [1, 2, 3]},
-                   {<<"table2">>, [1, 2, 3]}],
-                  []},
-                 current:take_write_batch(
-                   {[{<<"table1">>, [1, 2, 3]},
-                     {<<"table2">>, [1, 2, 3]}]}, 25)),
-
+    RequestItems = #{<<"table1">> => [1, 2, 3], <<"table2">> => [1, 2, 3]},
+    ?assertEqual({RequestItems, #{}}, current:take_write_batch(RequestItems, 25)),
 
     {Batch1, Rest1} = current:take_write_batch(
-                      {[{<<"table1">>, lists:seq(1, 30)},
-                        {<<"table2">>, lists:seq(1, 30)}]}, 25),
-    ?assertEqual([{<<"table1">>, lists:seq(1, 25)}], Batch1),
-    ?assertEqual([{<<"table1">>, lists:seq(26, 30)},
-                  {<<"table2">>, lists:seq(1, 30)}], Rest1),
+                      #{<<"table1">> => lists:seq(1, 30),
+                        <<"table2">> => lists:seq(1, 30)}, 25),
+    ?assertEqual(#{<<"table1">> => lists:seq(1, 25)}, Batch1),
+    ?assertEqual(#{<<"table1">> => lists:seq(26, 30),
+                   <<"table2">> => lists:seq(1, 30)}, Rest1),
 
+    {Batch2, Rest2} = current:take_write_batch(Rest1, 25),
+    ?assertEqual(#{<<"table1">> => lists:seq(26, 30),
+                   <<"table2">> => lists:seq(1, 20)}, Batch2),
+    ?assertEqual(#{<<"table2">> => lists:seq(21, 30)}, Rest2),
 
-    {Batch2, Rest2} = current:take_write_batch({Rest1}, 25),
-    ?assertEqual([{<<"table1">>, lists:seq(26, 30)},
-                  {<<"table2">>, lists:seq(1, 20)}], Batch2),
-    ?assertEqual([{<<"table2">>, lists:seq(21, 30)}], Rest2),
-
-    {Batch3, Rest3} = current:take_write_batch({Rest2}, 25),
-    ?assertEqual([{<<"table2">>, lists:seq(21, 30)}], Batch3),
-    ?assertEqual([], Rest3).
+    {Batch3, Rest3} = current:take_write_batch(Rest2, 25),
+    ?assertEqual(#{<<"table2">> => lists:seq(21, 30)}, Batch3),
+    ?assertEqual(#{}, Rest3).
 
 take_get_batch_test() ->
-    Spec = {[{<<"Keys">>, [1,2,3]},
-             {<<"AttributesToGet">>, [<<"foo">>, <<"bar">>]},
-             {<<"ConsistentRead">>, false}]},
+    Spec = #{
+        <<"Keys">> => [1,2,3],
+        <<"AttributesToGet">> => [<<"foo">>, <<"bar">>],
+        <<"ConsistentRead">> => false
+    },
 
-    {Batch1, Rest1} = current:take_get_batch({[{<<"table1">>, Spec},
-                                               {<<"table2">>, Spec}]}, 2),
+    {Batch1, Rest1} = current:take_get_batch(#{
+        <<"table1">> => Spec,
+        <<"table2">> => Spec
+    }, 2),
 
+    ?assertEqual(
+        #{
+            <<"table1">> => #{
+                <<"Keys">> => [1, 2],
+                <<"AttributesToGet">> => [<<"foo">>, <<"bar">>],
+                <<"ConsistentRead">> => false
+            }
+        },
+        Batch1
+    ),
 
-    ?assertEqual([{<<"table1">>, {[{<<"Keys">>, [1, 2]},
-                                   {<<"AttributesToGet">>, [<<"foo">>, <<"bar">>]},
-                                   {<<"ConsistentRead">>, false}]}}],
-                 Batch1),
-
-    {Batch2, _Rest2} = current:take_get_batch({Rest1}, 2),
-    ?assertEqual([{<<"table1">>, {[{<<"Keys">>, [3]},
-                                   {<<"AttributesToGet">>, [<<"foo">>, <<"bar">>]},
-                                   {<<"ConsistentRead">>, false}]}},
-                  {<<"table2">>, {[{<<"Keys">>, [1]},
-                                   {<<"AttributesToGet">>, [<<"foo">>, <<"bar">>]},
-                                   {<<"ConsistentRead">>, false}]}}],
-                 Batch2).
+    {Batch2, Rest2} = current:take_get_batch(Rest1, 2),
+    ?assertEqual(
+        #{
+            <<"table1">> => #{
+                <<"Keys">> => [3],
+                <<"AttributesToGet">> => [<<"foo">>, <<"bar">>],
+                <<"ConsistentRead">> => false
+            },
+            <<"table2">> => #{
+                <<"Keys">> => [1],
+                <<"AttributesToGet">> => [<<"foo">>, <<"bar">>],
+                <<"ConsistentRead">> => false
+            }
+        },
+        Batch2
+    ),
+    {Batch3, Rest3} = current:take_get_batch(Rest2, 2),
+    ?assertEqual(
+        #{
+            <<"table2">> => #{
+                <<"Keys">> => [2, 3],
+                <<"AttributesToGet">> => [<<"foo">>, <<"bar">>],
+                <<"ConsistentRead">> => false
+            }
+        },
+        Batch3
+    ),
+    ?assertEqual(#{}, Rest3).
 
 
 
 
 q() ->
-    ok = create_table(?TABLE),
-    ok = clear_table(?TABLE),
+    Table = <<"q_table">>,
+    create_table(Table),
 
-    Items = [#{<<"range_key">> => ?NUMBER(I),
-               <<"hash_key">>  => ?NUMBER(1)}
+    Items = [#{<<"range_key">> => ?NUMBER(I), <<"hash_key">>  => ?NUMBER(1)}
              || I <- lists:seq(1, 100)],
 
-    RequestItems = [begin
-                        {[{<<"PutRequest">>, {[{<<"Item">>, Item}]}}]}
-                    end || Item <- Items],
-    Request = {[{<<"RequestItems">>, {[{?TABLE, RequestItems}]}}]},
+    RequestItems = [#{<<"PutRequest">> => #{<<"Item">> =>Item}} || Item <- Items],
+    Request = #{<<"RequestItems">> => maps:from_list([{Table, RequestItems}])},
 
     ok = current:batch_write_item(Request, []),
 
-    Q = {[{<<"TableName">>, ?TABLE},
-          {<<"KeyConditions">>,
-           {[{<<"hash_key">>,
-              {[{<<"AttributeValueList">>, [{[{<<"N">>, <<"1">>}]}]},
-                {<<"ComparisonOperator">>, <<"EQ">>}]}}]}},
-          {<<"Limit">>, 10}]},
+    Q = #{
+        <<"TableName">> => Table,
+        <<"KeyConditions">> => #{
+            <<"hash_key">> => #{
+                <<"AttributeValueList">> => [#{<<"N">> => <<"1">>}],
+                <<"ComparisonOperator">> => <<"EQ">>
+            }
+        },
+        <<"Limit">> => 10
+    },
 
     {ok, ResultItems} = current:q(Q, []),
     ?assertEqual(lists:sort(Items), lists:sort(ResultItems)),
 
     %% Count
-    CountQ = {[{<<"TableName">>, ?TABLE},
-               {<<"KeyConditions">>,
-                {[{<<"hash_key">>,
-                   {[{<<"AttributeValueList">>, [{[{<<"N">>, <<"1">>}]}]},
-                     {<<"ComparisonOperator">>, <<"EQ">>}]}}]}},
-               {<<"Limit">>, 10},
-               {<<"Select">>, <<"COUNT">>}]},
+    CountQ = #{
+        <<"TableName">> => Table,
+        <<"KeyConditions">> => #{
+            <<"hash_key">> => #{
+                <<"AttributeValueList">> => [?NUMBER(1)],
+                <<"ComparisonOperator">> => <<"EQ">>
+            }
+        },
+        <<"Limit">> => 10,
+        <<"Select">> => <<"COUNT">>
+    },
     {ok, ResultCount} = current:q(CountQ, []),
     ?assertEqual(100, ResultCount),
 
     %% Errors
-    ErrorQ = {[{<<"TableName">>, <<"non-existing-table">>},
-               {<<"KeyConditions">>,
-                {[{<<"hash_key">>,
-                   {[{<<"AttributeValueList">>, [{[{<<"N">>, <<"1">>}]}]},
-                     {<<"ComparisonOperator">>, <<"EQ">>}]}}]}},
-               {<<"Limit">>, 10}]},
+    ErrorQ = #{
+        <<"TableName">> => <<"non-existing-table">>,
+        <<"KeyConditions">> => #{
+            <<"hash_key">> => #{
+                <<"AttributeValueList">> => [?NUMBER(1)],
+                <<"ComparisonOperator">> => <<"EQ">>
+            }
+        },
+        <<"Limit">> => 10
+    },
     ?assertMatch({error, {<<"ResourceNotFoundException">>, _}},
                  current:q(ErrorQ, [])),
 
@@ -268,8 +305,8 @@ q() ->
 
 
 get_put_update_delete() ->
-    ok = create_table(?TABLE),
-    ok = clear_table(?TABLE),
+    Table = <<"get_put_update_delete_table">>,
+    create_table(Table),
 
     Key = {[{<<"hash_key">>, {[{<<"N">>, <<"1">>}]}},
             {<<"range_key">>, {[{<<"N">>, <<"1">>}]}}]},
@@ -278,29 +315,32 @@ get_put_update_delete() ->
              {<<"range_key">>, #{<<"N">>  => <<"1">>}},
              {<<"hash_key">>,  #{<<"N">>  => <<"1">>}}]},
 
-    {ok, NoItem} = current:get_item({[{<<"TableName">>, ?TABLE},
-                                        {<<"Key">>, Key}]}),
+    {ok, NoItem} = current:get_item(#{<<"TableName">> => Table,
+                                      <<"Key">> => Key}),
     ?assertNot(maps:is_key(<<"Item">>, NoItem)),
 
 
-    ?assertMatch({ok, _}, current:put_item({[{<<"TableName">>, ?TABLE},
-                                             {<<"Item">>, Item}]})),
+    ?assertMatch({ok, _}, current:put_item(#{<<"TableName">> => Table,
+                                             <<"Item">> => Item})),
 
-    {ok, WithItem} = current:get_item({[{<<"TableName">>, ?TABLE},
-                                        {<<"Key">>, Key}]}),
+    {ok, WithItem} = current:get_item(#{<<"TableName">> => Table,
+                                        <<"Key">> =>Key}),
     ActualItem = maps:get(<<"Item">>, WithItem),
     ?assertEqual(lists:sort(element(1, Item)), lists:sort(maps:to_list(ActualItem))),
 
-    {ok, _} = current:update_item(
-                {[{<<"TableName">>, ?TABLE},
-                  {<<"AttributeUpdates">>,
-                   {[{<<"attribute">>, {[{<<"Action">>, <<"ADD">>},
-                                         {<<"Value">>, {[{<<"SS">>, [<<"bar">>]}]}}
-                                        ]}}]}},
-                  {<<"Key">>, Key}]}),
+    {ok, _} = current:update_item(#{
+        <<"TableName">> => Table,
+        <<"AttributeUpdates">> => #{
+            <<"attribute">> => #{
+                <<"Action">> => <<"ADD">>,
+                <<"Value">> => {[{<<"SS">>, [<<"bar">>]}]}
+            }
+        },
+        <<"Key">> => Key
+    }),
 
-    {ok, WithUpdate} = current:get_item({[{<<"TableName">>, ?TABLE},
-                                          {<<"Key">>, Key}]}),
+    {ok, WithUpdate} = current:get_item(#{<<"TableName">> => Table,
+                                          <<"Key">> => Key}),
     UpdatedItem = maps:get(<<"Item">>, WithUpdate),
     Attribute = maps:get(<<"attribute">>, UpdatedItem),
     ?assertMatch(#{<<"SS">> := _Values}, Attribute),
@@ -308,35 +348,38 @@ get_put_update_delete() ->
     ?assertEqual([<<"bar">>, <<"foo">>], lists:sort(Values)),
 
 
-    ?assertMatch({ok, _}, current:delete_item({[{<<"TableName">>, ?TABLE},
-                                                {<<"Key">>, Key}]})),
+    ?assertMatch({ok, _}, current:delete_item(#{<<"TableName">> => Table,
+                                                <<"Key">> =>Key})),
 
-    {ok, NoItemAgain} = current:get_item({[{<<"TableName">>, ?TABLE},
-                                           {<<"Key">>, Key}]}),
+    {ok, NoItemAgain} = current:get_item(#{<<"TableName">> => Table,
+                                           <<"Key">> => Key}),
     ?assertNot(maps:is_key(<<"Item">>, NoItemAgain)).
 
 
 retry_with_timeout() ->
+    Table = ?TABLE,
     meck:new(party, [passthrough]),
     meck:expect(party, post, fun (_, _, _, _) ->
                                          {error, claim_timeout}
                                  end),
 
     ?assertEqual({error, max_retries},
-                 current:describe_table({[{<<"TableName">>, ?TABLE}]},
+                 current:describe_table({[{<<"TableName">>, Table}]},
                                         [{retries, 3}])),
 
     meck:unload(party).
 
 timeout() ->
+    Table = ?TABLE,
     ?assertEqual({error, max_retries},
-                 current:describe_table({[{<<"TableName">>, ?TABLE}]},
+                 current:describe_table({[{<<"TableName">>, Table}]},
                                         [{call_timeout, 1}])).
 
 
 throttled() ->
-    ok = create_table(?TABLE),
-    ok = clear_table(?TABLE),
+    Table = <<"throttled_table">>,
+    create_table(Table),
+    ok = clear_table(Table),
 
     E = <<"com.amazonaws.dynamodb.v20120810#"
           "ProvisionedThroughputExceededException">>,
@@ -353,32 +396,31 @@ throttled() ->
                    ThrottledResponse,
                    meck_ret_spec:passthrough()])),
 
-
-    Key = {[{<<"hash_key">>, ?NUMBER(1)},
-            {<<"range_key">>, ?NUMBER(1)}]},
-
-    WriteRequestItems = [{[{<<"PutRequest">>, {[{<<"Item">>, Key}]}}]}],
-
-    WriteRequest = {[{<<"RequestItems">>,
-                      {[{?TABLE, WriteRequestItems}]}}
-                    ]},
+    WriteRequest = #{<<"RequestItems">> => maps:from_list([
+        {Table, [#{
+            <<"PutRequest">> => #{
+                <<"Item">> => #{
+                    <<"hash_key">>  => ?NUMBER(1),
+                    <<"range_key">> => ?NUMBER(1)
+                }
+            }
+        }]}
+    ])},
 
     ?assertEqual(ok, current:batch_write_item(WriteRequest, [{retries, 3}])),
 
     meck:unload(party).
 
 non_json_error() ->
+    Table = ?TABLE,
     meck:new(party, [passthrough]),
     PartyResponse = {ok, {{413, ""}, [], <<"not a json response!">>}},
     meck:expect(party, post, 4, PartyResponse),
 
-    Key = {[{<<"hash_key">>, ?NUMBER(1)},
-            {<<"range_key">>, ?NUMBER(1)}]},
-    Response = current:get_item({[{<<"TableName">>, ?TABLE},
-                                  {<<"Key">>, Key}]}),
+    Key = #{<<"hash_key">> => ?NUMBER(1), <<"range_key">> => ?NUMBER(1)},
+    Response = current:get_item(#{<<"TableName">> => Table, <<"Key">> => Key}),
 
-    ?assertEqual({error, {413, <<"not a json response!">>}},
-                 Response),
+    ?assertEqual({error, {413, <<"not a json response!">>}}, Response),
 
     meck:unload(party).
 
@@ -475,43 +517,48 @@ teardown(_) ->
 
 
 create_table(Name) ->
-    AttrDefs = [{[{<<"AttributeName">>, <<"hash_key">>},
-                  {<<"AttributeType">>, <<"N">>}]},
-                {[{<<"AttributeName">>, <<"range_key">>},
-                  {<<"AttributeType">>, <<"N">>}]}],
-    KeySchema = [{[{<<"AttributeName">>, <<"hash_key">>},
-                   {<<"KeyType">>, <<"HASH">>}]},
-                 {[{<<"AttributeName">>, <<"range_key">>},
-                   {<<"KeyType">>, <<"RANGE">>}]}],
+    AttrDefs = [
+        #{<<"AttributeName">> => <<"hash_key">>, <<"AttributeType">> => <<"N">>},
+        #{<<"AttributeName">> => <<"range_key">>, <<"AttributeType">> => <<"N">>}
+    ],
+    KeySchema = [
+        #{<<"AttributeName">> => <<"hash_key">>, <<"KeyType">> => <<"HASH">>},
+        #{<<"AttributeName">> => <<"range_key">>, <<"KeyType">> => <<"RANGE">>}
+    ],
 
-    R = {[{<<"AttributeDefinitions">>, AttrDefs},
-          {<<"KeySchema">>, KeySchema},
-          {<<"ProvisionedThroughput">>,
-           {[{<<"ReadCapacityUnits">>, 10},
-             {<<"WriteCapacityUnits">>, 5}]}},
-          {<<"TableName">>, Name}]},
-
-    case current:describe_table({[{<<"TableName">>, Name}]}) of
-        {error, {<<"ResourceNotFoundException">>, _}} ->
-            ?assertMatch({ok, _},
-                         current:create_table(R, [{timeout, 5000}, {retries, 3}])),
-            ok = current:wait_for_active(?TABLE, 5000);
-        {error, {_Type, Reason}} ->
-            error_logger:info_msg("~p~n", [Reason]);
-        {ok, _} ->
-            ok
-    end.
+    R = #{
+        <<"AttributeDefinitions">> => AttrDefs,
+        <<"KeySchema">> => KeySchema,
+        <<"ProvisionedThroughput">> => #{
+            <<"ReadCapacityUnits">> => 10,
+            <<"WriteCapacityUnits">> => 5
+        },
+        <<"TableName">> => Name
+    },
+    {ok, _} = current:create_table(R, [{timeout, 5000}, {retries, 3}]).
+    % case current:describe_table(#{<<"TableName">> => Name}) of
+    %     {error, {<<"ResourceNotFoundException">>, _}} ->
+    %         ?assertMatch({ok, _},
+    %                      ),
+    %         ok = current:wait_for_active(Name, 5000);
+    %     {error, {_Type, Reason}} ->
+    %         error_logger:info_msg("~p~n", [Reason]);
+    %     {ok, _} ->
+    %         ok
+    % end.
 
 clear_table(Name) ->
-    case current:scan({[{<<"TableName">>, Name},
-                        {<<"AttributesToGet">>, [<<"hash_key">>, <<"range_key">>]}]},
-                      []) of
+    Query = #{
+        <<"TableName">>       => Name,
+        <<"AttributesToGet">> => [<<"hash_key">>, <<"range_key">>]
+    },
+    case current:scan(Query, []) of
         {ok, []} ->
             ok;
         {ok, Items} ->
-            RequestItems = [{[{<<"DeleteRequest">>,
-                               {[{<<"Key">>, Item}]}}]} || Item <- Items],
-            Request = {[{<<"RequestItems">>, {[{Name, RequestItems}]}}]},
+            RequestItems = [#{<<"DeleteRequest">> => #{<<"Key">> => Item}} || Item <- Items],
+            Request = #{<<"RequestItems">> => maps:from_list([{Name, RequestItems}])},
+            io:format("~p~n", [Request]),
             ok = current:batch_write_item(Request, []),
             clear_table(Name)
     end.
